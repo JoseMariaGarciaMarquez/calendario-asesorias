@@ -1,6 +1,7 @@
 import streamlit as st
 import json
 import os
+import requests
 from datetime import datetime, timedelta, date, time
 from streamlit_calendar import calendar
 
@@ -12,7 +13,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Archivo para almacenar las citas
+# Configuración de almacenamiento persistente
+USE_GIST = st.secrets.get("USE_GIST", False)
+if USE_GIST:
+    GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")
+    GIST_ID = st.secrets.get("GIST_ID", "")
+else:
+    GITHUB_TOKEN = ""
+    GIST_ID = ""
+
+# Archivo para almacenar las citas localmente (fallback)
 CITAS_FILE = "citas.json"
 
 # Niveles educativos
@@ -25,20 +35,75 @@ HORARIOS_DISPONIBLES = [
 ]
 
 # Funciones para gestionar citas
+def cargar_citas_desde_gist():
+    """Carga las citas desde GitHub Gist"""
+    try:
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        response = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers)
+        
+        if response.status_code == 200:
+            gist_data = response.json()
+            # Buscar el archivo citas.json en el gist
+            for filename, file_data in gist_data['files'].items():
+                if filename == "citas.json":
+                    return json.loads(file_data['content'])
+        return {}
+    except Exception as e:
+        st.error(f"Error al cargar citas desde Gist: {str(e)}")
+        return {}
+
+def guardar_citas_en_gist(citas):
+    """Guarda las citas en GitHub Gist"""
+    try:
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        data = {
+            "files": {
+                "citas.json": {
+                    "content": json.dumps(citas, ensure_ascii=False, indent=2)
+                }
+            }
+        }
+        response = requests.patch(f"https://api.github.com/gists/{GIST_ID}", 
+                                 headers=headers, 
+                                 json=data)
+        
+        if response.status_code != 200:
+            st.error(f"Error al guardar citas en Gist: {response.status_code}")
+            return False
+        return True
+    except Exception as e:
+        st.error(f"Error al guardar citas: {str(e)}")
+        return False
+
 def cargar_citas():
-    """Carga las citas desde el archivo JSON"""
-    if os.path.exists(CITAS_FILE):
-        try:
-            with open(CITAS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+    """Carga las citas desde el archivo JSON o Gist"""
+    if USE_GIST and GITHUB_TOKEN and GIST_ID:
+        return cargar_citas_desde_gist()
+    else:
+        # Fallback a archivo local
+        if os.path.exists(CITAS_FILE):
+            try:
+                with open(CITAS_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
 
 def guardar_citas(citas):
-    """Guarda las citas en el archivo JSON"""
-    with open(CITAS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(citas, f, ensure_ascii=False, indent=2)
+    """Guarda las citas en el archivo JSON o Gist"""
+    if USE_GIST and GITHUB_TOKEN and GIST_ID:
+        return guardar_citas_en_gist(citas)
+    else:
+        # Fallback a archivo local
+        with open(CITAS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(citas, f, ensure_ascii=False, indent=2)
+        return True
 
 def agendar_cita(fecha_str, hora, nombre, email, tema, nivel, comentarios=""):
     """Agenda una nueva cita"""
