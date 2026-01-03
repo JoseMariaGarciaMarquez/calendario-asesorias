@@ -14,16 +14,38 @@ st.set_page_config(
 )
 
 # Configuración de almacenamiento persistente
-USE_GIST = st.secrets.get("USE_GIST", False)
-if USE_GIST:
+STORAGE_TYPE = st.secrets.get("STORAGE_TYPE", "local")  # local, gist, sheets
+
+# GitHub Gist
+if STORAGE_TYPE == "gist":
     GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")
     GIST_ID = st.secrets.get("GIST_ID", "")
 else:
     GITHUB_TOKEN = ""
     GIST_ID = ""
 
+# Google Sheets
+if STORAGE_TYPE == "sheets":
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        SHEETS_CREDENTIALS = st.secrets.get("gcp_service_account", None)
+        SHEET_URL = st.secrets.get("SHEET_URL", "")
+    except:
+        SHEETS_CREDENTIALS = None
+        SHEET_URL = ""
+else:
+    SHEETS_CREDENTIALS = None
+    SHEET_URL = ""
+
 # Archivo para almacenar las citas localmente (fallback)
 CITAS_FILE = "citas.json"
+
+# Inicializar session state para caché
+if 'citas_cache' not in st.session_state:
+    st.session_state.citas_cache = None
+if 'cache_loaded' not in st.session_state:
+    st.session_state.cache_loaded = False
 
 # Niveles educativos
 NIVELES = ["Primaria", "Secundaria", "Preparatoria", "Universidad", "Otro"]
@@ -81,29 +103,127 @@ def guardar_citas_en_gist(citas):
         st.error(f"Error al guardar citas: {str(e)}")
         return False
 
+def cargar_citas_desde_sheets():
+    """Carga las citas desde Google Sheets"""
+    try:
+        if not SHEETS_CREDENTIALS:
+            return {}
+        
+        scopes = ['https://www.googleapis.com/auth/spreadsheets']
+        creds = Credentials.from_service_account_info(SHEETS_CREDENTIALS, scopes=scopes)
+        client = gspread.authorize(creds)
+        
+        sheet = client.open_by_url(SHEET_URL).sheet1
+        data = sheet.get_all_values()
+        
+        if len(data) <= 1:  # Solo headers o vacío
+            return {}
+        
+        # Convertir a formato de citas
+        citas = {}
+        for row in data[1:]:  # Saltar header
+            if len(row) >= 7:
+                fecha_str = row[0]
+                if fecha_str not in citas:
+                    citas[fecha_str] = []
+                citas[fecha_str].append({
+                    "hora": row[1],
+                    "nombre": row[2],
+                    "email": row[3],
+                    "tema": row[4],
+                    "nivel": row[5],
+                    "comentarios": row[6],
+                    "fecha_registro": row[7] if len(row) > 7 else ""
+                })
+        return citas
+    except Exception as e:
+        st.error(f"Error al cargar desde Google Sheets: {str(e)}")
+        return {}
+
+def guardar_citas_en_sheets(citas):
+    """Guarda las citas en Google Sheets"""
+    try:
+        if not SHEETS_CREDENTIALS:
+            return False
+        
+        scopes = ['https://www.googleapis.com/auth/spreadsheets']
+        creds = Credentials.from_service_account_info(SHEETS_CREDENTIALS, scopes=scopes)
+        client = gspread.authorize(creds)
+        
+        sheet = client.open_by_url(SHEET_URL).sheet1
+        
+        # Limpiar y preparar datos
+        rows = [["Fecha", "Hora", "Nombre", "Email", "Tema", "Nivel", "Comentarios", "Registro"]]
+        
+        for fecha_str, lista_citas in citas.items():
+            for cita in lista_citas:
+                rows.append([
+                    fecha_str,
+                    cita["hora"],
+                    cita["nombre"],
+                    cita["email"],
+                    cita["tema"],
+                    cita["nivel"],
+                    cita.get("comentarios", ""),
+                    cita.get("fecha_registro", "")
+                ])
+        
+        # Actualizar sheet
+        sheet.clear()
+        sheet.update(rows, range_name='A1')
+        return True
+    except Exception as e:
+        st.error(f"Error al guardar en Google Sheets: {str(e)}")
+        return False
+
 def cargar_citas():
-    """Carga las citas desde el archivo JSON o Gist"""
-    if USE_GIST and GITHUB_TOKEN and GIST_ID:
-        return cargar_citas_desde_gist()
+    """Carga las citas desde el archivo JSON, Gist o Sheets con caché"""
+    # Si ya está en caché y cargado, devolver caché
+    if st.session_state.cache_loaded and st.session_state.citas_cache is not None:
+        return st.session_state.citas_cache
+    
+    # Cargar desde el almacenamiento configurado
+    citas = {}
+    
+    if STORAGE_TYPE == "gist" and GITHUB_TOKEN and GIST_ID:
+        citas = cargar_citas_desde_gist()
+    elif STORAGE_TYPE == "sheets" and SHEETS_CREDENTIALS and SHEET_URL:
+        citas = cargar_citas_desde_sheets()
     else:
         # Fallback a archivo local
         if os.path.exists(CITAS_FILE):
             try:
                 with open(CITAS_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    citas = json.load(f)
             except:
-                return {}
-        return {}
+                citas = {}
+    
+    # Guardar en caché
+    st.session_state.citas_cache = citas
+    st.session_state.cache_loaded = True
+    
+    return citas
 
 def guardar_citas(citas):
-    """Guarda las citas en el archivo JSON o Gist"""
-    if USE_GIST and GITHUB_TOKEN and GIST_ID:
+    """Guarda las citas en el archivo JSON, Gist o Sheets y actualiza caché"""
+    # Actualizar caché primero
+    st.session_state.citas_cache = citas
+    st.session_state.cache_loaded = True
+    
+    # Guardar en almacenamiento persistente
+    if STORAGE_TYPE == "gist" and GITHUB_TOKEN and GIST_ID:
         return guardar_citas_en_gist(citas)
+    elif STORAGE_TYPE == "sheets" and SHEETS_CREDENTIALS and SHEET_URL:
+        return guardar_citas_en_sheets(citas)
     else:
         # Fallback a archivo local
-        with open(CITAS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(citas, f, ensure_ascii=False, indent=2)
-        return True
+        try:
+            with open(CITAS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(citas, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            st.error(f"Error al guardar localmente: {str(e)}")
+            return False
 
 def agendar_cita(fecha_str, hora, nombre, email, tema, nivel, comentarios=""):
     """Agenda una nueva cita"""
